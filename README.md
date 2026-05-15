@@ -37,10 +37,16 @@ python3 mdns-detect.py -f targets.txt --concise --timeout 2
 ```
 
 ```
-[VULN] 10.0.0.42:5353         Office-Printer.local         7 services  (ipp,http,printer,...)
-[VULN] 10.0.0.51:5353         apple-tv.local               3 services  (airplay,raop,companion)
-[ ok ] 10.0.0.77:5353         no response
-[ERR ] bogus.example:5353     resolve: [Errno 8] ...
+STATUS TARGET                 HOSTNAME                     DETAIL
+───────────────────────────────────────────────────────────────────────────────────────────────────────────
+[VULN] 10.0.0.42:5353         Office-Printer.local         7 services, 18.4 ms: http: Office-Printer @80,
+                                                           ipp: Office-Printer @631,
+                                                           pdl-datastream: Office-Printer @9100, +4 more
+[VULN] 10.0.0.51:5353         apple-tv.local               3 services, 11.8 ms: airplay: Living Room @7000,
+                                                           companion-link: Living Room @49152,
+                                                           raop: Living Room @5000
+[ ok ] 10.0.0.77:5353                                      no response
+[ERR ] bogus.example:5353                                  resolve: [Errno 8] nodename nor servname provided
 Scanned 161 | Vulnerable 23 | Clean 134 | Errors 4 | 14.2s
 ```
 

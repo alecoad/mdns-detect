@@ -19,6 +19,7 @@ import shutil
 import socket
 import struct
 import sys
+import textwrap
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -442,15 +443,14 @@ class ColorRenderer:
 
 
 class ConciseRenderer:
-    """Streams one row per host as probes complete, with header up front and a
-    summary after. Hosts with >2 services wrap to multiple lines (2 per line)
-    aligned under the DETAIL column."""
+    """Streams one bounded, evidence-focused row per host as probes complete."""
 
-    # Column widths matched to the format strings in _format_row.
+    # Column widths matched to the format strings in _print_row.
     _W_TAG = 6      # "[VULN]"
     _W_TARGET = 22
     _W_HOST = 28
-    _W_DETAIL = 40  # soft cap on the DETAIL column; services flow-wrap inside it
+    _W_DETAIL = 48  # soft cap on the DETAIL column; detail wraps inside it
+    _MAX_DETAIL_LINES = 3
 
     def __init__(self) -> None:
         self.use_color = sys.stdout.isatty()
@@ -471,52 +471,163 @@ class ConciseRenderer:
             f"{'HOSTNAME':<{self._W_HOST}} "
             f"DETAIL"
         )
-        rule_w = self._detail_col + 30
+        rule_w = self._detail_col + self._W_DETAIL
         print(self._c(header, "1"))
         print(self._c("─" * rule_w, "2"))
         self._header_printed = True
 
-    def _wrap_services(self, count: int, names: list[str]) -> list[str]:
-        """Flow-wrap `N services  (a, b, c, ...)` to fit within `_W_DETAIL`,
-        breaking at commas. Continuation lines have no indent baked in — the
-        caller indents them under the DETAIL column."""
-        noun = "service" if count == 1 else "services"
-        prefix = f"{count} {noun}  ("
+    def _truncate(self, text: str, width: int) -> str:
+        if len(text) <= width:
+            return text
+        if width <= 3:
+            return text[:width]
+        return text[:width - 3] + "..."
+
+    def _col(self, text: str, width: int) -> str:
+        return self._truncate(text, width).ljust(width)
+
+    def _rtt(self, r: ProbeResult) -> str | None:
+        return f"{r.rtt_ms:.1f} ms" if r.rtt_ms is not None else None
+
+    def _service_entry(self, svc: Service) -> str:
+        name = _short_service_name(svc.service_type)
+        label = _instance_label(svc.instance, svc.service_type).strip(".")
+        parts = [name]
+        if label and label != svc.instance and label != name:
+            parts.append(f": {label}")
+        elif label and label != name and not label.endswith(".local"):
+            parts.append(f": {label}")
+        if svc.port:
+            parts.append(f" @{svc.port}")
+        return self._truncate("".join(parts), self._W_DETAIL)
+
+    def _service_entries(self, services: list[Service]) -> list[str]:
+        entries: list[str] = []
+        seen: set[str] = set()
+        ordered = sorted(
+            services,
+            key=lambda s: (
+                _short_service_name(s.service_type),
+                _instance_label(s.instance, s.service_type),
+                s.port or 0,
+            ),
+        )
+        for svc in ordered:
+            entry = self._service_entry(svc)
+            key = entry.lower()
+            if key in seen:
+                continue
+            entries.append(entry)
+            seen.add(key)
+        return entries
+
+    def _wrap_entries(self, prefix: str, entries: list[str]) -> list[str]:
+        """Wrap comma-separated service evidence with a bounded line budget."""
+        if not entries:
+            return [prefix.rstrip(": ")]
+
         lines: list[str] = []
-        cur = prefix + names[0]
-        for name in names[1:]:
-            addition = ", " + name
-            if len(cur) + len(addition) > self._W_DETAIL:
-                lines.append(cur + ",")
-                cur = name
-            else:
+        cur = prefix
+        shown = 0
+        while shown < len(entries):
+            entry = entries[shown]
+            addition = entry if cur == prefix or not cur else ", " + entry
+            if len(cur) + len(addition) <= self._W_DETAIL:
                 cur += addition
-        lines.append(cur + ")")
+                shown += 1
+                continue
+
+            if cur == prefix:
+                cur = self._truncate(cur + entry, self._W_DETAIL)
+                shown += 1
+
+            if len(lines) >= self._MAX_DETAIL_LINES - 1 and shown < len(entries):
+                break
+
+            lines.append(cur + ("," if shown < len(entries) else ""))
+            cur = ""
+
+        if cur and len(lines) < self._MAX_DETAIL_LINES:
+            lines.append(cur)
+
+        omitted = len(entries) - shown
+        if omitted > 0:
+            more = f"+{omitted} more"
+            if len(lines) < self._MAX_DETAIL_LINES:
+                lines.append(more)
+            else:
+                last = lines[-1].rstrip(",")
+                suffix = f", {more}"
+                lines[-1] = (
+                    last + suffix
+                    if len(last) + len(suffix) <= self._W_DETAIL
+                    else more
+                )
+
         return lines
+
+    def _wrap_text(self, text: str, max_lines: int = 2) -> list[str]:
+        lines = textwrap.wrap(text, width=self._W_DETAIL) or [""]
+        if len(lines) <= max_lines:
+            return lines
+        lines = lines[:max_lines]
+        lines[-1] = self._truncate(lines[-1].rstrip(". ") + " ...", self._W_DETAIL)
+        return lines
+
+    def _detail_lines(self, r: ProbeResult) -> list[str]:
+        rtt = self._rtt(r)
+        if not r.services:
+            return [", ".join(part for part in ("responded", rtt) if part)]
+
+        entries = self._service_entries(r.services)
+        count = len(entries)
+        noun = "service" if count == 1 else "services"
+        prefix_parts = [f"{count} {noun}"]
+        if rtt:
+            prefix_parts.append(rtt)
+        prefix = ", ".join(prefix_parts) + ": "
+        return self._wrap_entries(prefix, entries)
+
+    def _primary_hostname(self, r: ProbeResult) -> str:
+        return next(iter(sorted(r.hostnames)), "")
+
+    def _print_row(self, tag: str, target: str, hostname: str,
+                   detail_lines: list[str]) -> None:
+        first = (
+            f"{tag} "
+            f"{self._col(target, self._W_TARGET)} "
+            f"{self._col(hostname, self._W_HOST)} "
+            f"{detail_lines[0]}"
+        )
+        print(first)
+        indent = " " * self._detail_col
+        for line in detail_lines[1:]:
+            print(indent + line)
 
     def per_target(self, r: ProbeResult, verbose: bool) -> None:
         if not self._header_printed:
             self._print_header()
         if r.status == "vulnerable":
-            tag = self._c("[VULN]", "1;31")
-            hn = next(iter(r.hostnames), "")
-            count = len(r.services)
-            names = [_short_service_name(s.service_type) for s in r.services]
-            if not names:
-                detail_lines = ["responded"]
-            else:
-                detail_lines = self._wrap_services(count, names)
-            first = f"{tag} {r.target_str:<{self._W_TARGET}} {hn:<{self._W_HOST}} {detail_lines[0]}"
-            print(first)
-            indent = " " * self._detail_col
-            for line in detail_lines[1:]:
-                print(indent + line)
+            self._print_row(
+                self._c("[VULN]", "1;31"),
+                r.target_str,
+                self._primary_hostname(r),
+                self._detail_lines(r),
+            )
         elif r.status == "clean":
-            print(f"{self._c('[ ok ]', '32')} {r.target_str:<{self._W_TARGET}} "
-                  f"{'':<{self._W_HOST}} no response")
+            self._print_row(
+                self._c("[ ok ]", "32"),
+                r.target_str,
+                "",
+                ["no response"],
+            )
         else:
-            print(f"{self._c('[ERR ]', '1;33')} {r.target_str:<{self._W_TARGET}} "
-                  f"{'':<{self._W_HOST}} {r.error}")
+            self._print_row(
+                self._c("[ERR ]", "1;33"),
+                r.target_str,
+                "",
+                self._wrap_text(r.error or "error"),
+            )
         sys.stdout.flush()
 
     def summary(self, results: list[ProbeResult], elapsed: float) -> None:
