@@ -38,22 +38,24 @@ python3 mdns-detect.py -f targets.txt --timeout 2
 ```
 mDNS Detection (Remote Network)
 mode=full  timeout=2.0s  concurrency=64
-────────────────────────────────────────────────────────────────────────────────────────────────────
-STATUS         TARGET                 HOSTNAME                   EVIDENCE
-────────────────────────────────────────────────────────────────────────────────────────────────────
-VULNERABLE     10.0.0.42:5353         Office-Printer.local       responded to off-link mDNS query;
-                                                                 disclosed 7 service types: http,
-                                                                 ipp, pdl-datastream (+4)
-VULNERABLE     10.0.0.51:5353         apple-tv.local             responded to off-link mDNS query;
-                                                                 disclosed 3 service types:
-                                                                 airplay, companion-link, raop
-ERROR          bogus.example:5353     -                          DNS resolution failed
-OK             10.0.0.77:5353         -                          no response
-────────────────────────────────────────────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────────────────────────
+RESULTS
+────────────────────────────────────────────────────────────────────────────────
+[*] 10.0.0.42:5353 - VULNERABLE - HOSTNAME: Office-Printer.local
+     EVIDENCE: off-link mDNS response; disclosed 7 service types: http, ipp,
+               pdl-datastream (+4)
+[*] 10.0.0.51:5353 - VULNERABLE - HOSTNAME: apple-tv.local
+     EVIDENCE: off-link mDNS response; disclosed 3 service types: airplay,
+               companion-link, raop
+[*] bogus.example:5353 - ERROR - HOSTNAME: -
+     EVIDENCE: DNS resolution failed
+[*] 10.0.0.77:5353 - OK - HOSTNAME: -
+     EVIDENCE: no response
+────────────────────────────────────────────────────────────────────────────────
 Scanned 161 | Vulnerable 23 | OK 134 | Errors 4 | 14.2s
 ```
 
-Vulnerable hosts are listed first, followed by errors and clean hosts. For large reports, the table header repeats every 30 result rows. The evidence column stays compact: it explains the off-link mDNS response and summarizes the disclosed service types without dumping every instance, port, or TXT value into the row.
+Vulnerable hosts are listed first, followed by errors and clean hosts. For large reports, the `RESULTS` section header repeats every 30 records. Each record keeps the target, verdict, and hostname on one line, with the evidence on an indented subrow.
 
 **2. Add raw packet counts when you need extra proof:**
 

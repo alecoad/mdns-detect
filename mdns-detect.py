@@ -370,10 +370,6 @@ def _vlen(s: str) -> int:
     return len(_strip_ansi(s))
 
 
-def _vpad(s: str, width: int) -> str:
-    return s + " " * max(0, width - _vlen(s))
-
-
 def _truncate(s: str, width: int) -> str:
     if _vlen(s) <= width:
         return s
@@ -409,11 +405,9 @@ def _short_error(msg: str | None) -> str:
 class TerminalRenderer:
     """Default client-facing terminal report."""
 
-    _W_STATUS = 14
-    _W_TARGET = 22
-    _W_HOST = 26
     _MAX_SERVICES = 3
     _HEADER_EVERY = 30
+    _EVIDENCE_PREFIX = "     EVIDENCE: "
 
     def __init__(self, *, mode: str, timeout: float, concurrency: int,
                  stream: TextIO = sys.stdout) -> None:
@@ -426,9 +420,8 @@ class TerminalRenderer:
             and not os.environ.get("NO_COLOR")
         )
         self.width = shutil.get_terminal_size((100, 24)).columns
-        fixed = self._W_STATUS + self._W_TARGET + self._W_HOST + 3
-        self._W_EVIDENCE = max(34, min(72, self.width - fixed))
-        self._rule_w = fixed + self._W_EVIDENCE
+        self._W_EVIDENCE = max(44, min(96, self.width - len(self._EVIDENCE_PREFIX)))
+        self._rule_w = max(72, min(100, self.width))
 
     def _c(self, s: str, code: str) -> str:
         return f"\033[{code}m{s}\033[0m" if self.use_color else s
@@ -477,7 +470,7 @@ class TerminalRenderer:
         if r.status == "clean":
             return "no response"
 
-        parts = ["responded to off-link mDNS query", self._service_summary(r)]
+        parts = ["off-link mDNS response", self._service_summary(r)]
         if verbose and r.rtt_ms is not None:
             parts.append(f"RTT {r.rtt_ms:.1f} ms")
         if verbose and r.raw_packets:
@@ -490,13 +483,14 @@ class TerminalRenderer:
         return textwrap.wrap(text, width=self._W_EVIDENCE) or [""]
 
     def _print_row(self, r: ProbeResult, verbose: bool) -> None:
-        status = _vpad(self._status(r), self._W_STATUS)
-        target = _vpad(_truncate(r.target_str, self._W_TARGET), self._W_TARGET)
-        host = _vpad(_truncate(self._primary_hostname(r), self._W_HOST), self._W_HOST)
+        status = self._status(r)
+        target = _truncate(r.target_str, 48)
+        host = _truncate(self._primary_hostname(r), 48)
         evidence_lines = self._wrap(self._evidence(r, verbose))
 
-        print(f"{status} {target} {host} {evidence_lines[0]}", file=self.stream)
-        indent = " " * (self._W_STATUS + 1 + self._W_TARGET + 1 + self._W_HOST + 1)
+        print(f"[*] {target} - {status} - HOSTNAME: {host}", file=self.stream)
+        print(f"{self._EVIDENCE_PREFIX}{evidence_lines[0]}", file=self.stream)
+        indent = " " * len(self._EVIDENCE_PREFIX)
         for line in evidence_lines[1:]:
             print(f"{indent}{line}", file=self.stream)
 
@@ -504,15 +498,10 @@ class TerminalRenderer:
         rank = {"vulnerable": 0, "error": 1, "clean": 2}
         return sorted(results, key=lambda r: (rank.get(r.status, 3), r.target_str))
 
-    def _print_table_header(self) -> None:
+    def _print_section_header(self, *, continued: bool = False) -> None:
         print(self._rule(), file=self.stream)
-        print(
-            f"{'STATUS':<{self._W_STATUS}} "
-            f"{'TARGET':<{self._W_TARGET}} "
-            f"{'HOSTNAME':<{self._W_HOST}} "
-            "EVIDENCE",
-            file=self.stream,
-        )
+        label = "RESULTS (continued)" if continued else "RESULTS"
+        print(self._c(label, "1"), file=self.stream)
         print(self._rule(), file=self.stream)
 
     def render(self, results: list[ProbeResult], elapsed: float, verbose: bool) -> None:
@@ -526,11 +515,11 @@ class TerminalRenderer:
             ),
             file=self.stream,
         )
-        self._print_table_header()
+        self._print_section_header()
         ordered = self._ordered(results)
         for i, r in enumerate(ordered):
             if i > 0 and i % self._HEADER_EVERY == 0:
-                self._print_table_header()
+                self._print_section_header(continued=True)
             self._print_row(r, verbose)
         print(self._rule(), file=self.stream)
 
