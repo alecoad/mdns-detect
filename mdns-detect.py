@@ -442,50 +442,43 @@ class ColorRenderer:
 
 
 class ConciseRenderer:
-    """Buffered, batched per-host output. Shows a progress bar on stderr while
-    probing, then prints headers + rows + summary once all probes complete."""
+    """Streams one row per host as probes complete, with header up front and a
+    summary after. Hosts with >2 services wrap to multiple lines (2 per line)
+    aligned under the DETAIL column."""
 
     # Column widths matched to the format strings in _format_row.
     _W_TAG = 6      # "[VULN]"
     _W_TARGET = 22
     _W_HOST = 28
+    _SERVICES_PER_LINE = 2
 
     def __init__(self) -> None:
         self.use_color = sys.stdout.isatty()
-        self.show_progress = sys.stderr.isatty()
-        self.width = shutil.get_terminal_size((100, 24)).columns
-        self._buffer: list[str] = []
-        self._done = 0
-        self._total = 0
+        self._header_printed = False
 
-    def _c(self, s: str, code: str, *, stream=sys.stdout) -> str:
-        use = self.use_color if stream is sys.stdout else stream.isatty()
-        return f"\033[{code}m{s}\033[0m" if use else s
-
-    def start(self, total: int) -> None:
-        self._total = total
-
-    def _draw_progress(self) -> None:
-        if not self.show_progress or self._total == 0:
-            return
-        pct = self._done / self._total
-        bar_w = 30
-        filled = int(bar_w * pct)
-        bar = "█" * filled + "░" * (bar_w - filled)
-        msg = f"  scanning  [{bar}]  {self._done}/{self._total}  ({pct * 100:5.1f}%)"
-        sys.stderr.write("\r\033[K" + self._c(msg, "36", stream=sys.stderr))
-        sys.stderr.flush()
-
-    def _clear_progress(self) -> None:
-        if self.show_progress:
-            sys.stderr.write("\r\033[K")
-            sys.stderr.flush()
+    def _c(self, s: str, code: str) -> str:
+        return f"\033[{code}m{s}\033[0m" if self.use_color else s
 
     @property
     def _detail_col(self) -> int:
         return self._W_TAG + 1 + self._W_TARGET + 1 + self._W_HOST + 1
 
-    def _format_row(self, r: ProbeResult) -> str:
+    def _print_header(self) -> None:
+        print()  # blank line separating from the command prompt
+        header = (
+            f"{'STATUS':<{self._W_TAG}} "
+            f"{'TARGET':<{self._W_TARGET}} "
+            f"{'HOSTNAME':<{self._W_HOST}} "
+            f"DETAIL"
+        )
+        rule_w = self._detail_col + 30
+        print(self._c(header, "1"))
+        print(self._c("─" * rule_w, "2"))
+        self._header_printed = True
+
+    def per_target(self, r: ProbeResult, verbose: bool) -> None:
+        if not self._header_printed:
+            self._print_header()
         if r.status == "vulnerable":
             tag = self._c("[VULN]", "1;31")
             hn = next(iter(r.hostnames), "")
@@ -497,58 +490,26 @@ class ConciseRenderer:
             elif len(names) <= 2:
                 detail_lines = [f"{count} {noun}  ({', '.join(names)})"]
             else:
-                detail_lines = self._wrap_services(count, names, noun)
+                # Force a real multi-line wrap: header line + N service lines
+                detail_lines = [f"{count} {noun}:"]
+                for i in range(0, len(names), self._SERVICES_PER_LINE):
+                    chunk = names[i:i + self._SERVICES_PER_LINE]
+                    detail_lines.append(", ".join(chunk))
             first = f"{tag} {r.target_str:<{self._W_TARGET}} {hn:<{self._W_HOST}} {detail_lines[0]}"
-            if len(detail_lines) == 1:
-                return first
+            print(first)
             indent = " " * self._detail_col
-            return "\n".join([first] + [indent + line for line in detail_lines[1:]])
+            for line in detail_lines[1:]:
+                print(indent + line)
         elif r.status == "clean":
-            return (f"{self._c('[ ok ]', '32')} {r.target_str:<{self._W_TARGET}} "
-                    f"{'':<{self._W_HOST}} no response")
+            print(f"{self._c('[ ok ]', '32')} {r.target_str:<{self._W_TARGET}} "
+                  f"{'':<{self._W_HOST}} no response")
         else:
-            return (f"{self._c('[ERR ]', '1;33')} {r.target_str:<{self._W_TARGET}} "
-                    f"{'':<{self._W_HOST}} {r.error}")
-
-    def _wrap_services(self, count: int, names: list[str], noun: str) -> list[str]:
-        """First line: '<count> services  (a, b,'  — subsequent: 'c, d,' ... last: '... z)'."""
-        avail = max(20, self.width - self._detail_col)
-        first_prefix = f"{count} {noun}  ("
-        lines: list[str] = []
-        cur = first_prefix
-        is_first = True
-        for i, name in enumerate(names):
-            sep = "" if (is_first and cur == first_prefix) else ", "
-            piece = sep + name
-            if len(cur) + len(piece) > avail and cur not in (first_prefix, ""):
-                lines.append(cur + ",")
-                cur = name
-                is_first = False
-            else:
-                cur += piece if not is_first or cur != first_prefix else name
-        lines.append(cur + ")")
-        return lines
-
-    def per_target(self, r: ProbeResult, verbose: bool) -> None:
-        self._buffer.append(self._format_row(r))
-        self._done += 1
-        self._draw_progress()
+            print(f"{self._c('[ERR ]', '1;33')} {r.target_str:<{self._W_TARGET}} "
+                  f"{'':<{self._W_HOST}} {r.error}")
+        sys.stdout.flush()
 
     def summary(self, results: list[ProbeResult], elapsed: float) -> None:
-        self._clear_progress()
-        print()
-        header = (
-            f"{'STATUS':<{self._W_TAG}} "
-            f"{'TARGET':<{self._W_TARGET}} "
-            f"{'HOSTNAME':<{self._W_HOST}} "
-            f"DETAIL"
-        )
-        rule_w = max(self._detail_col + 30, min(self.width, self._detail_col + 60))
-        print(self._c(header, "1"))
-        print(self._c("─" * rule_w, "2"))
-        for line in self._buffer:
-            print(line)
-        print()
+        print()  # blank line before the summary
         vuln = sum(1 for r in results if r.status == "vulnerable")
         clean = sum(1 for r in results if r.status == "clean")
         err = sum(1 for r in results if r.status == "error")
@@ -665,8 +626,6 @@ async def run(targets: list[tuple[str, int]], args: argparse.Namespace, renderer
     results: list[ProbeResult] = [None] * len(targets)  # type: ignore[list-item]
     stream = not isinstance(renderer, JsonRenderer)
     lock = asyncio.Lock()
-    if hasattr(renderer, "start"):
-        renderer.start(len(targets))
 
     async def one(i: int, host: str, port: int) -> None:
         async with sem:
