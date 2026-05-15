@@ -442,13 +442,33 @@ class ColorRenderer:
 
 
 class ConciseRenderer:
+    # Column widths matched to the format strings in per_target.
+    _W_TAG = 6      # "[VULN]"
+    _W_TARGET = 22
+    _W_HOST = 28
+
     def __init__(self) -> None:
         self.use_color = sys.stdout.isatty()
+        self._header_printed = False
 
     def _c(self, s: str, code: str) -> str:
         return f"\033[{code}m{s}\033[0m" if self.use_color else s
 
+    def _print_header(self) -> None:
+        header = (
+            f"{'STATUS':<{self._W_TAG}} "
+            f"{'TARGET':<{self._W_TARGET}} "
+            f"{'HOSTNAME':<{self._W_HOST}} "
+            f"DETAIL"
+        )
+        rule = "─" * (self._W_TAG + 1 + self._W_TARGET + 1 + self._W_HOST + 1 + 30)
+        print(self._c(header, "1"))
+        print(self._c(rule, "2"))
+        self._header_printed = True
+
     def per_target(self, r: ProbeResult, verbose: bool) -> None:
+        if not self._header_printed:
+            self._print_header()
         if r.status == "vulnerable":
             tag = self._c("[VULN]", "1;31")
             hn = next(iter(r.hostnames), "")
@@ -457,11 +477,11 @@ class ConciseRenderer:
             if len(r.services) > 5:
                 short.append("...")
             detail = f"{count} services  ({','.join(short)})" if short else "responded"
-            print(f"{tag} {r.target_str:<22} {hn:<28} {detail}")
+            print(f"{tag} {r.target_str:<{self._W_TARGET}} {hn:<{self._W_HOST}} {detail}")
         elif r.status == "clean":
-            print(f"{self._c('[ ok ]', '32')} {r.target_str:<22} no response")
+            print(f"{self._c('[ ok ]', '32')} {r.target_str:<{self._W_TARGET}} {'':<{self._W_HOST}} no response")
         else:
-            print(f"{self._c('[ERR ]', '1;33')} {r.target_str:<22} {r.error}")
+            print(f"{self._c('[ERR ]', '1;33')} {r.target_str:<{self._W_TARGET}} {'':<{self._W_HOST}} {r.error}")
 
     def summary(self, results: list[ProbeResult], elapsed: float) -> None:
         vuln = sum(1 for r in results if r.status == "vulnerable")
