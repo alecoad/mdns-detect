@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
+import os
 import random
+import re
 import shutil
 import socket
 import struct
@@ -22,7 +23,7 @@ import sys
 import textwrap
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TextIO
 
 
 # ─── DNS wire format (RFC 1035) ──────────────────────────────────────────────
@@ -352,356 +353,189 @@ def _instance_label(instance_fqdn: str, service_type: str) -> str:
 
 # ─── Renderers ──────────────────────────────────────────────────────────────
 
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+
 def _short_service_name(stype: str) -> str:
     # `_ipp._tcp.local` → `ipp`
     s = stype.split(".")[0]
     return s.lstrip("_")
 
 
-def _ansi(code: str, use_color: bool) -> str:
-    return f"\033[{code}m" if use_color else ""
+def _strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub("", s)
 
 
-class ColorRenderer:
-    """ANSI-colored per-host output with a box-drawn service table. Stdlib only."""
-
-    def __init__(self) -> None:
-        self.use_color = sys.stdout.isatty()
-        self.width = shutil.get_terminal_size((100, 24)).columns
-
-    def _c(self, s: str, code: str) -> str:
-        return f"{_ansi(code, self.use_color)}{s}{_ansi('0', self.use_color)}"
-
-    def per_target(self, r: ProbeResult, verbose: bool) -> None:
-        rule_char = "━"
-        header = f" {r.target_str} "
-        bar = rule_char * max(4, (self.width - len(header)) // 2)
-        print(self._c(f"{bar}{header}{bar}", "1;36"))
-
-        if r.status == "vulnerable":
-            verdict = self._c("VULNERABLE", "1;31") + "  responded to off-link mDNS query"
-        elif r.status == "clean":
-            verdict = self._c("not vulnerable", "32") + self._c("  (no response within timeout)", "2")
-        else:
-            verdict = self._c(f"ERROR  {r.error}", "1;33")
-        print(f"  Status:    {verdict}")
-        if r.rtt_ms is not None:
-            print(f"  RTT:       {self._c(f'{r.rtt_ms:.1f} ms', '2')}")
-        for hn, addr in r.hostnames.items():
-            print(f"  Hostname:  {self._c(hn, '1')} -> {addr}")
-
-        if r.services:
-            services = sorted(r.services, key=lambda s: s.service_type)
-            rows = []
-            for svc in services:
-                txt = ", ".join(
-                    (k if v is True else f"{k}={v}")
-                    for k, v in list(svc.txt.items())[:6]
-                )
-                rows.append((svc.service_type, svc.instance,
-                             str(svc.port) if svc.port else "-", txt))
-            headers = ("Service", "Instance", "Port", "TXT details")
-            widths = [
-                max(len(headers[i]), max((len(row[i]) for row in rows), default=0))
-                for i in range(4)
-            ]
-            # Cap the TXT column so wide TXT doesn't blow up the table.
-            max_txt = max(20, self.width - sum(widths[:3]) - 12)
-            widths[3] = min(widths[3], max_txt)
-
-            def fmt_row(cols, bold=False):
-                cells = []
-                for i, c in enumerate(cols):
-                    if i == 3 and len(c) > widths[3]:
-                        c = c[: widths[3] - 1] + "…"
-                    pad = c.ljust(widths[i]) if i != 2 else c.rjust(widths[i])
-                    cells.append(self._c(pad, "1") if bold else pad)
-                return "  " + "  ".join(cells)
-
-            print(self._c("  Services:", "1"))
-            print(fmt_row(headers, bold=True))
-            print("  " + self._c("─" * (sum(widths) + 6), "2"))
-            for row in rows:
-                print(fmt_row(row))
-
-        if verbose and r.raw_packets:
-            total = sum(len(p) for p in r.raw_packets)
-            print(self._c(f"  raw packets: {len(r.raw_packets)} ({total} bytes)", "2"))
-        print()
-
-    def summary(self, results: list[ProbeResult], elapsed: float) -> None:
-        vuln = sum(1 for r in results if r.status == "vulnerable")
-        clean = sum(1 for r in results if r.status == "clean")
-        err = sum(1 for r in results if r.status == "error")
-        print(
-            f"{self._c('Scanned', '1')} {len(results)}  "
-            f"{self._c('Vulnerable', '31')} {vuln}  "
-            f"{self._c('Clean', '32')} {clean}  "
-            f"{self._c('Errors', '33')} {err}  "
-            f"{self._c(f'{elapsed:.1f}s', '2')}"
-        )
+def _vlen(s: str) -> int:
+    return len(_strip_ansi(s))
 
 
-class ConciseRenderer:
-    """Streams one bounded, evidence-focused row per host as probes complete."""
+def _vpad(s: str, width: int) -> str:
+    return s + " " * max(0, width - _vlen(s))
 
-    # Column widths matched to the format strings in _print_row.
-    _W_TAG = 6      # "[VULN]"
+
+def _truncate(s: str, width: int) -> str:
+    if _vlen(s) <= width:
+        return s
+    plain = _strip_ansi(s)
+    if width <= 3:
+        return plain[:width]
+    return plain[:width - 3] + "..."
+
+
+def _short_error(msg: str | None) -> str:
+    if not msg:
+        return "unreachable"
+    m = msg.lower()
+    if "nodename nor servname" in m or "name resolution" in m:
+        return "DNS resolution failed"
+    if "name or service not known" in m:
+        return "DNS resolution failed"
+    if "temporary failure in name resolution" in m:
+        return "DNS resolution failed"
+    if "timed out" in m or "timeout" in m:
+        return "timeout"
+    if "connection refused" in m:
+        return "connection refused"
+    if "no route to host" in m:
+        return "no route to host"
+    if "network is unreachable" in m:
+        return "network unreachable"
+    if "host is down" in m:
+        return "host is down"
+    return msg.split(":", 1)[-1].strip()[:60] or "error"
+
+
+class TerminalRenderer:
+    """Default client-facing terminal report."""
+
+    _W_STATUS = 14
     _W_TARGET = 22
-    _W_HOST = 28
-    _W_DETAIL = 48  # soft cap on the DETAIL column; detail wraps inside it
-    _MAX_DETAIL_LINES = 3
+    _W_HOST = 26
+    _MAX_SERVICES = 3
 
-    def __init__(self) -> None:
-        self.use_color = sys.stdout.isatty()
-        self._header_printed = False
+    def __init__(self, *, mode: str, timeout: float, concurrency: int,
+                 stream: TextIO = sys.stdout) -> None:
+        self.mode = mode
+        self.timeout = timeout
+        self.concurrency = concurrency
+        self.stream = stream
+        self.use_color = (
+            bool(getattr(stream, "isatty", lambda: False)())
+            and not os.environ.get("NO_COLOR")
+        )
+        self.width = shutil.get_terminal_size((100, 24)).columns
+        fixed = self._W_STATUS + self._W_TARGET + self._W_HOST + 3
+        self._W_EVIDENCE = max(34, min(72, self.width - fixed))
+        self._rule_w = fixed + self._W_EVIDENCE
 
     def _c(self, s: str, code: str) -> str:
         return f"\033[{code}m{s}\033[0m" if self.use_color else s
 
-    @property
-    def _detail_col(self) -> int:
-        return self._W_TAG + 1 + self._W_TARGET + 1 + self._W_HOST + 1
+    def _rule(self) -> str:
+        return self._c("─" * self._rule_w, "2")
 
-    def _print_header(self) -> None:
-        print()  # blank line separating from the command prompt
-        header = (
-            f"{'STATUS':<{self._W_TAG}} "
-            f"{'TARGET':<{self._W_TARGET}} "
-            f"{'HOSTNAME':<{self._W_HOST}} "
-            f"DETAIL"
-        )
-        rule_w = self._detail_col + self._W_DETAIL
-        print(self._c(header, "1"))
-        print(self._c("─" * rule_w, "2"))
-        self._header_printed = True
-
-    def _truncate(self, text: str, width: int) -> str:
-        if len(text) <= width:
-            return text
-        if width <= 3:
-            return text[:width]
-        return text[:width - 3] + "..."
-
-    def _col(self, text: str, width: int) -> str:
-        return self._truncate(text, width).ljust(width)
-
-    def _rtt(self, r: ProbeResult) -> str | None:
-        return f"{r.rtt_ms:.1f} ms" if r.rtt_ms is not None else None
-
-    def _service_entry(self, svc: Service) -> str:
-        name = _short_service_name(svc.service_type)
-        label = _instance_label(svc.instance, svc.service_type).strip(".")
-        parts = [name]
-        if label and label != svc.instance and label != name:
-            parts.append(f": {label}")
-        elif label and label != name and not label.endswith(".local"):
-            parts.append(f": {label}")
-        if svc.port:
-            parts.append(f" @{svc.port}")
-        return self._truncate("".join(parts), self._W_DETAIL)
-
-    def _service_entries(self, services: list[Service]) -> list[str]:
-        entries: list[str] = []
-        seen: set[str] = set()
-        ordered = sorted(
-            services,
-            key=lambda s: (
-                _short_service_name(s.service_type),
-                _instance_label(s.instance, s.service_type),
-                s.port or 0,
-            ),
-        )
-        for svc in ordered:
-            entry = self._service_entry(svc)
-            key = entry.lower()
-            if key in seen:
-                continue
-            entries.append(entry)
-            seen.add(key)
-        return entries
-
-    def _wrap_entries(self, prefix: str, entries: list[str]) -> list[str]:
-        """Wrap comma-separated service evidence with a bounded line budget."""
-        if not entries:
-            return [prefix.rstrip(": ")]
-
-        lines: list[str] = []
-        cur = prefix
-        shown = 0
-        while shown < len(entries):
-            entry = entries[shown]
-            addition = entry if cur == prefix or not cur else ", " + entry
-            if len(cur) + len(addition) <= self._W_DETAIL:
-                cur += addition
-                shown += 1
-                continue
-
-            if cur == prefix:
-                cur = self._truncate(cur + entry, self._W_DETAIL)
-                shown += 1
-
-            if len(lines) >= self._MAX_DETAIL_LINES - 1 and shown < len(entries):
-                break
-
-            lines.append(cur + ("," if shown < len(entries) else ""))
-            cur = ""
-
-        if cur and len(lines) < self._MAX_DETAIL_LINES:
-            lines.append(cur)
-
-        omitted = len(entries) - shown
-        if omitted > 0:
-            more = f"+{omitted} more"
-            if len(lines) < self._MAX_DETAIL_LINES:
-                lines.append(more)
-            else:
-                last = lines[-1].rstrip(",")
-                suffix = f", {more}"
-                lines[-1] = (
-                    last + suffix
-                    if len(last) + len(suffix) <= self._W_DETAIL
-                    else more
-                )
-
-        return lines
-
-    def _wrap_text(self, text: str, max_lines: int = 2) -> list[str]:
-        lines = textwrap.wrap(text, width=self._W_DETAIL) or [""]
-        if len(lines) <= max_lines:
-            return lines
-        lines = lines[:max_lines]
-        lines[-1] = self._truncate(lines[-1].rstrip(". ") + " ...", self._W_DETAIL)
-        return lines
-
-    def _detail_lines(self, r: ProbeResult) -> list[str]:
-        rtt = self._rtt(r)
-        if not r.services:
-            return [", ".join(part for part in ("responded", rtt) if part)]
-
-        entries = self._service_entries(r.services)
-        count = len(entries)
-        noun = "service" if count == 1 else "services"
-        prefix_parts = [f"{count} {noun}"]
-        if rtt:
-            prefix_parts.append(rtt)
-        prefix = ", ".join(prefix_parts) + ": "
-        return self._wrap_entries(prefix, entries)
+    def _status(self, r: ProbeResult) -> str:
+        if r.status == "vulnerable":
+            return self._c("VULNERABLE", "1;31")
+        if r.status == "error":
+            return self._c("ERROR", "1;33")
+        return self._c("OK", "32")
 
     def _primary_hostname(self, r: ProbeResult) -> str:
-        return next(iter(sorted(r.hostnames)), "")
+        return next(iter(sorted(r.hostnames)), "-")
 
-    def _print_row(self, tag: str, target: str, hostname: str,
-                   detail_lines: list[str]) -> None:
-        first = (
-            f"{tag} "
-            f"{self._col(target, self._W_TARGET)} "
-            f"{self._col(hostname, self._W_HOST)} "
-            f"{detail_lines[0]}"
-        )
-        print(first)
-        indent = " " * self._detail_col
-        for line in detail_lines[1:]:
-            print(indent + line)
+    def _service_names(self, r: ProbeResult) -> list[str]:
+        names: list[str] = []
+        seen: set[str] = set()
+        for svc in sorted(r.services, key=lambda s: _short_service_name(s.service_type)):
+            name = _short_service_name(svc.service_type)
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+        return names
 
-    def per_target(self, r: ProbeResult, verbose: bool) -> None:
-        if not self._header_printed:
-            self._print_header()
-        if r.status == "vulnerable":
-            self._print_row(
-                self._c("[VULN]", "1;31"),
-                r.target_str,
-                self._primary_hostname(r),
-                self._detail_lines(r),
-            )
-        elif r.status == "clean":
-            self._print_row(
-                self._c("[ ok ]", "32"),
-                r.target_str,
-                "",
-                ["no response"],
-            )
-        else:
-            self._print_row(
-                self._c("[ERR ]", "1;33"),
-                r.target_str,
-                "",
-                self._wrap_text(r.error or "error"),
-            )
-        sys.stdout.flush()
+    def _service_summary(self, r: ProbeResult) -> str:
+        names = self._service_names(r)
+        count = len(names)
+        if count == 0:
+            return "no service details"
+        shown = names[:self._MAX_SERVICES]
+        more = count - len(shown)
+        noun = "service" if count == 1 else "services"
+        summary = f"{count} {noun}: {', '.join(shown)}"
+        if more:
+            summary += f" (+{more})"
+        return summary
 
-    def summary(self, results: list[ProbeResult], elapsed: float) -> None:
-        print()  # blank line before the summary
-        vuln = sum(1 for r in results if r.status == "vulnerable")
-        clean = sum(1 for r in results if r.status == "clean")
-        err = sum(1 for r in results if r.status == "error")
-        print(f"Scanned {len(results)} | Vulnerable {vuln} | Clean {clean} "
-              f"| Errors {err} | {elapsed:.1f}s")
+    def _evidence(self, r: ProbeResult, verbose: bool) -> str:
+        if r.status == "error":
+            return _short_error(r.error)
+        if r.status == "clean":
+            return "no response"
 
-
-class PlainRenderer:
-    def per_target(self, r: ProbeResult, verbose: bool) -> None:
-        print(f"=== {r.target_str} ===")
-        print(f"  status: {r.status}" + (f"  ({r.error})" if r.error else ""))
+        parts = ["responded"]
         if r.rtt_ms is not None:
-            print(f"  rtt: {r.rtt_ms:.1f} ms")
-        for hn, addr in r.hostnames.items():
-            print(f"  hostname: {hn} -> {addr}")
-        for svc in sorted(r.services, key=lambda s: s.service_type):
-            line = f"  {svc.service_type}  {svc.instance}"
-            if svc.port:
-                line += f"  port={svc.port}"
-            if svc.target:
-                line += f"  target={svc.target}"
-            print(line)
-            for k, v in svc.txt.items():
-                print(f"      {k}={v}")
-        print()
+            parts[0] = f"responded in {r.rtt_ms:.1f} ms"
+        parts.append(self._service_summary(r))
+        if verbose and r.raw_packets:
+            total = sum(len(p) for p in r.raw_packets)
+            parts.append(f"raw {len(r.raw_packets)} pkts / {total} B")
+        return "; ".join(parts)
 
-    def summary(self, results: list[ProbeResult], elapsed: float) -> None:
+    def _wrap(self, text: str) -> list[str]:
+        return textwrap.wrap(text, width=self._W_EVIDENCE) or [""]
+
+    def _print_row(self, r: ProbeResult, verbose: bool) -> None:
+        status = _vpad(self._status(r), self._W_STATUS)
+        target = _vpad(_truncate(r.target_str, self._W_TARGET), self._W_TARGET)
+        host = _vpad(_truncate(self._primary_hostname(r), self._W_HOST), self._W_HOST)
+        evidence_lines = self._wrap(self._evidence(r, verbose))
+
+        print(f"{status} {target} {host} {evidence_lines[0]}", file=self.stream)
+        indent = " " * (self._W_STATUS + 1 + self._W_TARGET + 1 + self._W_HOST + 1)
+        for line in evidence_lines[1:]:
+            print(f"{indent}{line}", file=self.stream)
+
+    def _ordered(self, results: list[ProbeResult]) -> list[ProbeResult]:
+        rank = {"vulnerable": 0, "error": 1, "clean": 2}
+        return sorted(results, key=lambda r: (rank.get(r.status, 3), r.target_str))
+
+    def render(self, results: list[ProbeResult], elapsed: float, verbose: bool) -> None:
+        print(file=self.stream)
+        print(self._c("mDNS Detection (Remote Network)", "1;36"), file=self.stream)
+        print(
+            self._c(
+                f"mode={self.mode}  timeout={self.timeout:.1f}s  "
+                f"concurrency={self.concurrency}",
+                "2",
+            ),
+            file=self.stream,
+        )
+        print(self._rule(), file=self.stream)
+        print(
+            f"{'STATUS':<{self._W_STATUS}} "
+            f"{'TARGET':<{self._W_TARGET}} "
+            f"{'HOSTNAME':<{self._W_HOST}} "
+            "EVIDENCE",
+            file=self.stream,
+        )
+        print(self._rule(), file=self.stream)
+        for r in self._ordered(results):
+            self._print_row(r, verbose)
+        print(self._rule(), file=self.stream)
+
         vuln = sum(1 for r in results if r.status == "vulnerable")
         clean = sum(1 for r in results if r.status == "clean")
         err = sum(1 for r in results if r.status == "error")
-        print(f"scanned={len(results)} vulnerable={vuln} clean={clean} "
-              f"errors={err} elapsed={elapsed:.1f}s")
-
-
-class JsonRenderer:
-    def __init__(self) -> None:
-        self._items: list[dict] = []
-
-    def per_target(self, r: ProbeResult, verbose: bool) -> None:
-        self._items.append({
-            "target": r.target_str,
-            "host": r.host,
-            "port": r.port,
-            "status": r.status,
-            "error": r.error,
-            "rtt_ms": r.rtt_ms,
-            "hostnames": r.hostnames,
-            "services": [
-                {
-                    "type": s.service_type,
-                    "instance": s.instance,
-                    "port": s.port,
-                    "target": s.target,
-                    "txt": s.txt,
-                } for s in r.services
-            ],
-        })
-
-    def summary(self, results: list[ProbeResult], elapsed: float) -> None:
-        out = {
-            "results": self._items,
-            "summary": {
-                "scanned": len(results),
-                "vulnerable": sum(1 for r in results if r.status == "vulnerable"),
-                "clean": sum(1 for r in results if r.status == "clean"),
-                "errors": sum(1 for r in results if r.status == "error"),
-                "elapsed_s": round(elapsed, 2),
-            },
-        }
-        print(json.dumps(out, indent=2, default=str))
+        summary = (
+            f"Scanned {len(results)} | "
+            f"Vulnerable {vuln} | OK {clean} | Errors {err} | {elapsed:.1f}s"
+        )
+        print(self._c(summary, "1"), file=self.stream)
+        print(file=self.stream)
 
 
 # ─── CLI ────────────────────────────────────────────────────────────────────
@@ -743,29 +577,22 @@ def load_targets(args: argparse.Namespace) -> list[tuple[str, int]]:
     return targets
 
 
-async def run(targets: list[tuple[str, int]], args: argparse.Namespace, renderer) -> int:
+async def run(targets: list[tuple[str, int]], args: argparse.Namespace,
+              renderer: TerminalRenderer) -> int:
     sem = asyncio.Semaphore(args.concurrency)
     results: list[ProbeResult] = [None] * len(targets)  # type: ignore[list-item]
-    stream = not isinstance(renderer, JsonRenderer)
-    lock = asyncio.Lock()
 
     async def one(i: int, host: str, port: int) -> None:
         async with sem:
             r = await probe(host, port, mode=args.mode, timeout=args.timeout,
                             verbose=args.verbose)
         results[i] = r
-        if stream:
-            async with lock:
-                renderer.per_target(r, args.verbose)
 
     t0 = time.perf_counter()
     await asyncio.gather(*(one(i, h, p) for i, (h, p) in enumerate(targets)))
     elapsed = time.perf_counter() - t0
 
-    if not stream:
-        for r in results:
-            renderer.per_target(r, args.verbose)
-    renderer.summary(results, elapsed)
+    renderer.render(results, elapsed, args.verbose)
 
     return 1 if any(r.status == "vulnerable" for r in results) else 0
 
@@ -784,27 +611,19 @@ def main() -> int:
     p.set_defaults(mode="full")
     p.add_argument("--timeout", type=float, default=2.0, help="per-stage timeout seconds (default 2.0)")
     p.add_argument("--concurrency", type=int, default=64, help="parallel probes (default 64)")
-    out = p.add_mutually_exclusive_group()
-    out.add_argument("--plain", dest="output", action="store_const", const="plain")
-    out.add_argument("--json", dest="output", action="store_const", const="json")
-    out.add_argument("--concise", dest="output", action="store_const", const="concise")
-    p.set_defaults(output="color")
-    p.add_argument("-v", "--verbose", action="store_true", help="record raw response packets")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="include raw response packet counts in the report")
     args = p.parse_args()
 
     targets = load_targets(args)
     if not targets:
         p.error("no targets given (positional or -f)")
 
-    renderer: Any
-    if args.output == "color":
-        renderer = ColorRenderer()
-    elif args.output == "concise":
-        renderer = ConciseRenderer()
-    elif args.output == "json":
-        renderer = JsonRenderer()
-    else:
-        renderer = PlainRenderer()
+    renderer = TerminalRenderer(
+        mode=args.mode,
+        timeout=args.timeout,
+        concurrency=args.concurrency,
+    )
 
     try:
         return asyncio.run(run(targets, args, renderer))

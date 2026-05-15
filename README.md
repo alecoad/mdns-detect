@@ -14,7 +14,7 @@ cd mdns-detect
 chmod +x mdns-detect.py
 ```
 
-Python 3.10+. **No dependencies** — drop the single file on a test box and run it. Color/box-drawing output uses plain ANSI escapes; auto-disabled when stdout isn't a TTY.
+Python 3.10+. **No dependencies** — drop the single file on a test box and run it. Color uses plain ANSI escapes, auto-disabled when stdout isn't a TTY or `NO_COLOR` is set.
 
 ## Usage
 
@@ -22,47 +22,41 @@ Python 3.10+. **No dependencies** — drop the single file on a test box and run
 mdns-detect.py [targets...] [-f targets.txt]
                [--basic | --full]                # default: --full
                [--timeout 2.0] [--concurrency 64]
-               [--plain | --json | --concise]    # default: color
-               [-v]                              # record raw response packets
+               [-v]                              # include raw packet counts
 ```
 
 Target format: `host:port`, `ip:port`, `[ipv6]:port`, or bare `host` / `ip` (defaults to 5353). In a `-f` file, `#` comments and blank lines are ignored.
 
 ### Typical workflow
 
-**1. Triage a large list with `--concise`:**
+**1. Scan a target list and capture the default report:**
 
 ```sh
-python3 mdns-detect.py -f targets.txt --concise --timeout 2
+python3 mdns-detect.py -f targets.txt --timeout 2
 ```
 
 ```
-STATUS TARGET                 HOSTNAME                     DETAIL
-───────────────────────────────────────────────────────────────────────────────────────────────────────────
-[VULN] 10.0.0.42:5353         Office-Printer.local         7 services, 18.4 ms: http: Office-Printer @80,
-                                                           ipp: Office-Printer @631,
-                                                           pdl-datastream: Office-Printer @9100, +4 more
-[VULN] 10.0.0.51:5353         apple-tv.local               3 services, 11.8 ms: airplay: Living Room @7000,
-                                                           companion-link: Living Room @49152,
-                                                           raop: Living Room @5000
-[ ok ] 10.0.0.77:5353                                      no response
-[ERR ] bogus.example:5353                                  resolve: [Errno 8] nodename nor servname provided
-Scanned 161 | Vulnerable 23 | Clean 134 | Errors 4 | 14.2s
+mDNS Detection (Remote Network)
+mode=full  timeout=2.0s  concurrency=64
+────────────────────────────────────────────────────────────────────────────────────────────────────
+STATUS         TARGET                 HOSTNAME                   EVIDENCE
+────────────────────────────────────────────────────────────────────────────────────────────────────
+VULNERABLE     10.0.0.42:5353         Office-Printer.local       responded in 18.4 ms; 7 services:
+                                                                 http, ipp, pdl-datastream (+4)
+VULNERABLE     10.0.0.51:5353         apple-tv.local             responded in 11.8 ms; 3 services:
+                                                                 airplay, companion-link, raop
+ERROR          bogus.example:5353     -                          DNS resolution failed
+OK             10.0.0.77:5353         -                          no response
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Scanned 161 | Vulnerable 23 | OK 134 | Errors 4 | 14.2s
 ```
 
-**2. Re-run the vulnerable subset with the default color output to capture per-host screenshots:**
+Vulnerable hosts are listed first, followed by errors and clean hosts. The evidence column stays compact: it shows response time and a summarized service inventory without dumping every instance, port, or TXT value into the row.
+
+**2. Add raw packet counts when you need extra proof:**
 
 ```sh
 python3 mdns-detect.py 10.0.0.42 10.0.0.51 -v
-```
-
-Per-target output shows verdict, RTT, resolved `.local` hostname, and a table of advertised services with ports and TXT key/value metadata.
-
-**3. Export structured results:**
-
-```sh
-python3 mdns-detect.py -f targets.txt --json > results.json
-jq '.results[] | select(.status=="vulnerable")' results.json
 ```
 
 ## Modes
