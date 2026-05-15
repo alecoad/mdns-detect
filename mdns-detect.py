@@ -413,6 +413,7 @@ class TerminalRenderer:
     _W_TARGET = 22
     _W_HOST = 26
     _MAX_SERVICES = 3
+    _HEADER_EVERY = 30
 
     def __init__(self, *, mode: str, timeout: float, concurrency: int,
                  stream: TextIO = sys.stdout) -> None:
@@ -464,8 +465,8 @@ class TerminalRenderer:
             return "no service details"
         shown = names[:self._MAX_SERVICES]
         more = count - len(shown)
-        noun = "service" if count == 1 else "services"
-        summary = f"{count} {noun}: {', '.join(shown)}"
+        noun = "service type" if count == 1 else "service types"
+        summary = f"disclosed {count} {noun}: {', '.join(shown)}"
         if more:
             summary += f" (+{more})"
         return summary
@@ -476,13 +477,13 @@ class TerminalRenderer:
         if r.status == "clean":
             return "no response"
 
-        parts = ["responded"]
-        if r.rtt_ms is not None:
-            parts[0] = f"responded in {r.rtt_ms:.1f} ms"
-        parts.append(self._service_summary(r))
+        parts = ["responded to off-link mDNS query", self._service_summary(r)]
+        if verbose and r.rtt_ms is not None:
+            parts.append(f"RTT {r.rtt_ms:.1f} ms")
         if verbose and r.raw_packets:
             total = sum(len(p) for p in r.raw_packets)
-            parts.append(f"raw {len(r.raw_packets)} pkts / {total} B")
+            noun = "pkt" if len(r.raw_packets) == 1 else "pkts"
+            parts.append(f"raw {len(r.raw_packets)} {noun}, {total} B")
         return "; ".join(parts)
 
     def _wrap(self, text: str) -> list[str]:
@@ -503,6 +504,17 @@ class TerminalRenderer:
         rank = {"vulnerable": 0, "error": 1, "clean": 2}
         return sorted(results, key=lambda r: (rank.get(r.status, 3), r.target_str))
 
+    def _print_table_header(self) -> None:
+        print(self._rule(), file=self.stream)
+        print(
+            f"{'STATUS':<{self._W_STATUS}} "
+            f"{'TARGET':<{self._W_TARGET}} "
+            f"{'HOSTNAME':<{self._W_HOST}} "
+            "EVIDENCE",
+            file=self.stream,
+        )
+        print(self._rule(), file=self.stream)
+
     def render(self, results: list[ProbeResult], elapsed: float, verbose: bool) -> None:
         print(file=self.stream)
         print(self._c("mDNS Detection (Remote Network)", "1;36"), file=self.stream)
@@ -514,16 +526,11 @@ class TerminalRenderer:
             ),
             file=self.stream,
         )
-        print(self._rule(), file=self.stream)
-        print(
-            f"{'STATUS':<{self._W_STATUS}} "
-            f"{'TARGET':<{self._W_TARGET}} "
-            f"{'HOSTNAME':<{self._W_HOST}} "
-            "EVIDENCE",
-            file=self.stream,
-        )
-        print(self._rule(), file=self.stream)
-        for r in self._ordered(results):
+        self._print_table_header()
+        ordered = self._ordered(results)
+        for i, r in enumerate(ordered):
+            if i > 0 and i % self._HEADER_EVERY == 0:
+                self._print_table_header()
             self._print_row(r, verbose)
         print(self._rule(), file=self.stream)
 
