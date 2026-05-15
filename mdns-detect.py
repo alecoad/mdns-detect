@@ -450,7 +450,7 @@ class ConciseRenderer:
     _W_TAG = 6      # "[VULN]"
     _W_TARGET = 22
     _W_HOST = 28
-    _SERVICES_PER_LINE = 2
+    _W_DETAIL = 40  # soft cap on the DETAIL column; services flow-wrap inside it
 
     def __init__(self) -> None:
         self.use_color = sys.stdout.isatty()
@@ -476,6 +476,24 @@ class ConciseRenderer:
         print(self._c("─" * rule_w, "2"))
         self._header_printed = True
 
+    def _wrap_services(self, count: int, names: list[str]) -> list[str]:
+        """Flow-wrap `N services  (a, b, c, ...)` to fit within `_W_DETAIL`,
+        breaking at commas. Continuation lines have no indent baked in — the
+        caller indents them under the DETAIL column."""
+        noun = "service" if count == 1 else "services"
+        prefix = f"{count} {noun}  ("
+        lines: list[str] = []
+        cur = prefix + names[0]
+        for name in names[1:]:
+            addition = ", " + name
+            if len(cur) + len(addition) > self._W_DETAIL:
+                lines.append(cur + ",")
+                cur = name
+            else:
+                cur += addition
+        lines.append(cur + ")")
+        return lines
+
     def per_target(self, r: ProbeResult, verbose: bool) -> None:
         if not self._header_printed:
             self._print_header()
@@ -484,17 +502,10 @@ class ConciseRenderer:
             hn = next(iter(r.hostnames), "")
             count = len(r.services)
             names = [_short_service_name(s.service_type) for s in r.services]
-            noun = "service" if count == 1 else "services"
             if not names:
                 detail_lines = ["responded"]
-            elif len(names) <= 2:
-                detail_lines = [f"{count} {noun}  ({', '.join(names)})"]
             else:
-                # Force a real multi-line wrap: header line + N service lines
-                detail_lines = [f"{count} {noun}:"]
-                for i in range(0, len(names), self._SERVICES_PER_LINE):
-                    chunk = names[i:i + self._SERVICES_PER_LINE]
-                    detail_lines.append(", ".join(chunk))
+                detail_lines = self._wrap_services(count, names)
             first = f"{tag} {r.target_str:<{self._W_TARGET}} {hn:<{self._W_HOST}} {detail_lines[0]}"
             print(first)
             indent = " " * self._detail_col
