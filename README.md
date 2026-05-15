@@ -38,24 +38,30 @@ python3 mdns-detect.py -f targets.txt --timeout 2
 ```
 mDNS Detection (Remote Network)
 mode=full  timeout=2.0s  concurrency=64
-────────────────────────────────────────────────────────────────────────────────
-RESULTS
-────────────────────────────────────────────────────────────────────────────────
-[*] 10.0.0.42:5353 - VULNERABLE - HOSTNAME: Office-Printer.local
-     EVIDENCE: off-link mDNS response; disclosed 7 service types: http, ipp,
-               pdl-datastream (+4)
-[*] 10.0.0.51:5353 - VULNERABLE - HOSTNAME: apple-tv.local
-     EVIDENCE: off-link mDNS response; disclosed 3 service types: airplay,
-               companion-link, raop
-[*] bogus.example:5353 - ERROR - HOSTNAME: -
-     EVIDENCE: DNS resolution failed
-[*] 10.0.0.77:5353 - OK - HOSTNAME: -
-     EVIDENCE: no response
-────────────────────────────────────────────────────────────────────────────────
+
+[*] 10.0.0.42:5353 - VULNERABLE
+    Hostname: Office-Printer.local
+    Evidence: off-link mDNS response; services disclosed: http, ipp,
+              pdl-datastream (+4)
+
+[*] 10.0.0.51:5353 - VULNERABLE
+    Hostname: apple-tv.local
+    Evidence: off-link mDNS response; services disclosed: airplay,
+              companion-link, raop
+
+[*] bogus.example:5353 - ERROR
+    Hostname: -
+    Evidence: DNS resolution failed
+
+[*] 10.0.0.77:5353 - OK
+    Hostname: -
+    Evidence: no response
+
+────────────────────────────────────────────────────────────────────────
 Scanned 161 | Vulnerable 23 | OK 134 | Errors 4 | 14.2s
 ```
 
-Vulnerable hosts are listed first, followed by errors and clean hosts. For large reports, the `RESULTS` section header repeats every 30 records. Each record keeps the target, verdict, and hostname on one line, with the evidence on an indented subrow.
+Vulnerable hosts are listed first, followed by errors and clean hosts. Each record starts with the target and verdict, then indents hostname and evidence on separate lines. For large reports, a short continued header appears every 30 records.
 
 **2. Add raw packet counts when you need extra proof:**
 

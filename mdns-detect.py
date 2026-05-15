@@ -407,7 +407,9 @@ class TerminalRenderer:
 
     _MAX_SERVICES = 3
     _HEADER_EVERY = 30
-    _EVIDENCE_PREFIX = "     EVIDENCE: "
+    _HOST_PREFIX = "    Hostname: "
+    _EVIDENCE_PREFIX = "    Evidence: "
+    _DETAILS_PREFIX = "    Details: "
 
     def __init__(self, *, mode: str, timeout: float, concurrency: int,
                  stream: TextIO = sys.stdout) -> None:
@@ -436,6 +438,9 @@ class TerminalRenderer:
             return self._c("ERROR", "1;33")
         return self._c("OK", "32")
 
+    def _target(self, r: ProbeResult) -> str:
+        return self._c(_truncate(r.target_str, 48), "1;34")
+
     def _primary_hostname(self, r: ProbeResult) -> str:
         return next(iter(sorted(r.hostnames)), "-")
 
@@ -458,8 +463,7 @@ class TerminalRenderer:
             return "no service details"
         shown = names[:self._MAX_SERVICES]
         more = count - len(shown)
-        noun = "service type" if count == 1 else "service types"
-        summary = f"disclosed {count} {noun}: {', '.join(shown)}"
+        summary = f"services disclosed: {', '.join(shown)}"
         if more:
             summary += f" (+{more})"
         return summary
@@ -470,39 +474,50 @@ class TerminalRenderer:
         if r.status == "clean":
             return "no response"
 
-        parts = ["off-link mDNS response", self._service_summary(r)]
+        return "; ".join(("off-link mDNS response", self._service_summary(r)))
+
+    def _details(self, r: ProbeResult, verbose: bool) -> str | None:
+        if not verbose or r.status != "vulnerable":
+            return None
+        parts = []
         if verbose and r.rtt_ms is not None:
             parts.append(f"RTT {r.rtt_ms:.1f} ms")
         if verbose and r.raw_packets:
             total = sum(len(p) for p in r.raw_packets)
             noun = "pkt" if len(r.raw_packets) == 1 else "pkts"
             parts.append(f"raw {len(r.raw_packets)} {noun}, {total} B")
-        return "; ".join(parts)
+        return "; ".join(parts) if parts else None
 
     def _wrap(self, text: str) -> list[str]:
         return textwrap.wrap(text, width=self._W_EVIDENCE) or [""]
 
+    def _print_wrapped(self, prefix: str, text: str) -> None:
+        lines = self._wrap(text)
+        print(f"{prefix}{lines[0]}", file=self.stream)
+        indent = " " * len(prefix)
+        for line in lines[1:]:
+            print(f"{indent}{line}", file=self.stream)
+
     def _print_row(self, r: ProbeResult, verbose: bool) -> None:
         status = self._status(r)
-        target = _truncate(r.target_str, 48)
         host = _truncate(self._primary_hostname(r), 48)
-        evidence_lines = self._wrap(self._evidence(r, verbose))
 
-        print(f"[*] {target} - {status} - HOSTNAME: {host}", file=self.stream)
-        print(f"{self._EVIDENCE_PREFIX}{evidence_lines[0]}", file=self.stream)
-        indent = " " * len(self._EVIDENCE_PREFIX)
-        for line in evidence_lines[1:]:
-            print(f"{indent}{line}", file=self.stream)
+        print(f"[*] {self._target(r)} - {status}", file=self.stream)
+        print(f"{self._HOST_PREFIX}{host}", file=self.stream)
+        self._print_wrapped(self._EVIDENCE_PREFIX, self._evidence(r, verbose))
+        details = self._details(r, verbose)
+        if details:
+            self._print_wrapped(self._DETAILS_PREFIX, details)
+        print(file=self.stream)
 
     def _ordered(self, results: list[ProbeResult]) -> list[ProbeResult]:
         rank = {"vulnerable": 0, "error": 1, "clean": 2}
         return sorted(results, key=lambda r: (rank.get(r.status, 3), r.target_str))
 
-    def _print_section_header(self, *, continued: bool = False) -> None:
+    def _print_continued_header(self) -> None:
         print(self._rule(), file=self.stream)
-        label = "RESULTS (continued)" if continued else "RESULTS"
-        print(self._c(label, "1"), file=self.stream)
-        print(self._rule(), file=self.stream)
+        print(self._c("mDNS Detection (continued)", "1"), file=self.stream)
+        print(file=self.stream)
 
     def render(self, results: list[ProbeResult], elapsed: float, verbose: bool) -> None:
         print(file=self.stream)
@@ -515,11 +530,11 @@ class TerminalRenderer:
             ),
             file=self.stream,
         )
-        self._print_section_header()
+        print(file=self.stream)
         ordered = self._ordered(results)
         for i, r in enumerate(ordered):
             if i > 0 and i % self._HEADER_EVERY == 0:
-                self._print_section_header(continued=True)
+                self._print_continued_header()
             self._print_row(r, verbose)
         print(self._rule(), file=self.stream)
 
